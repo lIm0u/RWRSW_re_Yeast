@@ -1,16 +1,20 @@
+import java.io.BufferedWriter;
 import java.io.IOException;
 import java.nio.file.Files;
-import java.nio.file.OpenOption;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+
+import static java.lang.Math.pow;
 
 public class Calculator {
+    private static final HashSet<String> buff = new HashSet<>(); // 缓冲区
     static HashMap<String, Double> netHashMap; // 原始网络数据 对应net.txt文件 存储为gene1:gene2 value
     static ArrayList<String> geneList; // 基因列表 本应来自net.txt文件，此处由于进一步筛选因此直接从geneList.txt读入
     static ArrayList<ArrayList<Double>> netMatrix; // 原始网络矩阵,数值来自netHashMap，行列坐标来自geneList
     static HashMap<String, Double> geneSimilarityHashMap; // 随机游走的基因相关性得分矩阵数据哈希表
-
     static HashMap<String, ArrayList<String>> sonsBuff; // 直接后代子节点缓冲区
     static ArrayList<Annotation> annotationList; // gene.gaf 注释文件数据
     static HashMap<String, ArrayList<String>> termToGeneList; // 本体术语-->术语注释的基因集间的映射表
@@ -22,86 +26,112 @@ public class Calculator {
     static HashMap<String, ArrayList<String>> geneToTermList;// 基因-->注释基因的本体术语集合间的映射表
     static HashMap<String, HashSet<String>> ecNumGeneHashMap; // 基因证据编号 哈希表: key=证据编码 value=该ec编码的基因集
     static HashMap<String, Double> similarityResult; // 相似度计算结果
-    private static HashSet<String> buff = new HashSet<>(); // 缓冲区
     private static boolean isInit = false; // 是否初始化标志
 
     // Part1
+    // 判断文件是否存在，并创建文件
+    public static void createFileIfNotExists(Path path) throws IOException {
+        if (!Files.exists(path)) {
+            Files.createFile(path);
+        }
+    }
+
+    // 根据参数选择文件读写路径
+    static ArrayList<String> getFilePaths(String gene_type) {
+        ArrayList<String> filePaths = new ArrayList<>();
+        if (Objects.equals(gene_type, "Yeast")) {
+            filePaths.add("buf/Yeast/YeastNet.v3.txt");
+            filePaths.add("buf/Yeast/YeastNet.v3.benchmark.txt");
+            filePaths.add("buf/Yeast/sgd.gaf");
+            filePaths.add("buf/Yeast/biochemical_pathways.tab");
+        } else if (Objects.equals(gene_type, "Human")) {
+            filePaths.add("buf/Human/HumanNet-XC.tsv");
+            filePaths.add("buf/Human/HumanNet-GSP.tsv");
+            filePaths.add("buf/Human/goa_human.gaf");
+            filePaths.add("buf/Human/PubChem_pathway_text_human.csv");
+        } else if (Objects.equals(gene_type, "Arabidopsis_thaliana")) {
+            filePaths.add("buf/Arabidopsis_thaliana/AraNet.txt");
+            filePaths.add("buf/Arabidopsis_thaliana/AraNet_GS.txt");
+            filePaths.add("buf/Arabidopsis_thaliana/tair.gaf");
+            filePaths.add("buf/Arabidopsis_thaliana/aracyc_pathways.20230103");
+        }
+        return filePaths;
+    }
+
     // 计算并存储原始基因网络数据矩阵 netMatrix
-    private static void getNetMatrix() throws IOException {
-        HashSet<String> tmp = new HashSet<>();
-
-        // 初始化 netHashMap
+    private static void getNetMatrix(String gene_type) throws IOException {
+        // 根据参数修改文件路径
+        final ArrayList<String> filePaths = getFilePaths(gene_type);
+        // 初始化 网络数据哈希表
         netHashMap = new HashMap<>();
-        for (FunctionNet edge : Reader.readNetFile("data/net.txt")) {
+        for (FunctionNet edge : Reader.readNetFile(filePaths.get(0))) {
             netHashMap.put(edge.gene1 + ":" + edge.gene2, edge.value / 10.0D); //做归一化处理
-            String gene1 = edge.gene1;
-            String gene2 = edge.gene2;
-            tmp.add(gene1);
-            tmp.add(gene2);
         }
-        geneList = new ArrayList<>(tmp);
-
-        // 存储 geneList.txt
-        StringBuilder sbg = new StringBuilder();
-        for (String line : geneList) {
-            sbg.append(line).append("\n");
+        // 读取 黄金基因列表
+        HashSet<String> goldGene = new HashSet<>();
+        for (String line : Files.readAllLines(Paths.get(filePaths.get(1)))) {
+            goldGene.add(line.split("\t")[0]);
+            goldGene.add(line.split("\t")[1]);
         }
-        if (!Files.exists(Paths.get("temp/geneList.txt")))
-            Files.createFile(Paths.get("temp/geneList.txt"));
-        Files.write(Paths.get("temp/geneList.txt"), sbg.toString().getBytes());
+        geneList = new ArrayList<>(goldGene);
+        // 存储 基因列表
+        StringBuilder sg = new StringBuilder();
+        for (String gene : geneList) {
+            sg.append(gene).append("\n");
+        }
+        createFileIfNotExists(Paths.get("temp/" + gene_type + "/geneList.txt"));
+        Files.write(Paths.get("temp/" + gene_type + "/geneList.txt"), sg.toString().getBytes());
 
-        // 计算 netMatrix
+        // 计算 原始网络矩阵
         netMatrix = new ArrayList<>();
-        netMatrix.ensureCapacity(4172);
-        for (int i = 0; i < geneList.size(); i++) {
+        for (int k = 0; k < geneList.size(); k++) {
             netMatrix.add(new ArrayList<>());
-            netMatrix.get(i).ensureCapacity(4172);
+            netMatrix.get(k).ensureCapacity(geneList.size());
             for (String s : geneList) {
-                String key = geneList.get(i) + ":" + s;
-                netMatrix.get(i).add(netHashMap.getOrDefault(key, 0.0D));
+                String key = geneList.get(k) + ":" + s;
+                if (netHashMap.containsKey(key)) {
+                    netMatrix.get(k).add(netHashMap.get(key));
+                }
             }
         }
-
         // 存储 netMatrix矩阵
         StringBuilder sb = new StringBuilder();
         for (ArrayList<Double> line : netMatrix) {
-            for (Iterator<Double> iterator = line.iterator(); iterator.hasNext(); ) {
-                double value = iterator.next();
+            for (double value : line) {
                 sb.append(value).append("\t");
             }
             sb.append("\n");
         }
-        if (!Files.exists(Paths.get("temp/netMatrix.txt")))
-            Files.createFile(Paths.get("temp/netMatrix.txt"));
-        Files.write(Paths.get("temp/netMatrix.txt"), sb.toString().getBytes());
+        createFileIfNotExists(Paths.get("temp/" + gene_type + "/netMatrix.txt"));
+        Files.write(Paths.get("temp/" + gene_type + "/netMatrix.txt"), sb.toString().getBytes());
     }
 
     // 计算权重矩阵
     private static ArrayList<ArrayList<Double>> getWMatrix() throws Exception {
-        double sita_2 = parameterVariable();
+        double n = netMatrix.size();
+        double sita_2 = parameterVariable(n);
         ArrayList<ArrayList<Double>> wM = new ArrayList<>();
-        wM.ensureCapacity(4172);
-        for (int i = 0; i < netMatrix.size(); i++) {
+        wM.ensureCapacity(geneList.size());
+        for (int i = 0; i < n; i++) {
             wM.add(new ArrayList<>());
-            wM.get(i).ensureCapacity(4172);
-            for (int j = 0; j < netMatrix.size(); j++) {
-                wM.get(i).add(Math.exp(-(euclideanDistance(netMatrix.get(i), netMatrix.get(j)) / sita_2)));
+            wM.get(i).ensureCapacity(geneList.size());
+            for (ArrayList<Double> matrix : netMatrix) {
+                wM.get(i).add(Math.exp(-(pow(euclideanDistance(netMatrix.get(i), matrix), 2) / sita_2)));
             }
         }
         return wM;
     }
 
     // 计算参数变量的平方
-    private static double parameterVariable() throws Exception {
+    private static double parameterVariable(double n) throws Exception {
         double sum = 0.0D;
-        for (int i = 0; i < netMatrix.size(); i++) {
-            for (int j = 0; j < netMatrix.size(); j++) {
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
                 if (i != j)
                     sum += euclideanDistance(netMatrix.get(i), netMatrix.get(j));
             }
         }
-        sum /= netMatrix.size();
-        sum /= (netMatrix.size() - 1);
+        sum /= (n * (n - 1));
         sum *= sum;
         return sum;
     }
@@ -119,12 +149,12 @@ public class Calculator {
 
     // 计算概率转移矩阵 pMatrix
     private static ArrayList<ArrayList<Double>> getPMatrix() throws Exception {
-        ArrayList<ArrayList<Double>> pMatrix = new ArrayList<>();
         ArrayList<ArrayList<Double>> wMatrix = getWMatrix();
-        pMatrix.ensureCapacity(4172);
+        ArrayList<ArrayList<Double>> pMatrix = new ArrayList<>();
+        pMatrix.ensureCapacity(geneList.size());
         for (int i = 0; i < netMatrix.size(); i++) {
             pMatrix.add(new ArrayList<>());
-            pMatrix.get(i).ensureCapacity(4172);
+            pMatrix.get(i).ensureCapacity(geneList.size());
             for (int j = 0; j < netMatrix.size(); j++) {
                 if (netMatrix.get(i).get(j) != 0.0D) {
                     double value = wMatrix.get(i).get(j);
@@ -138,156 +168,142 @@ public class Calculator {
                 }
             }
         }
-
         return pMatrix;
     }
 
     // 存储概率转移矩阵 pMatrix
-    private static void storagePTMatrix() throws Exception {
+    private static void storagePTMatrix(String gene_type) throws Exception {
+        // 根据参数修改文件路径
+        String filePath = "temp/" + gene_type + "/pMatrix.txt";
         ArrayList<ArrayList<Double>> pm = getPMatrix();
         StringBuilder sb = new StringBuilder();
         for (ArrayList<Double> line : pm) {
-            for (Iterator<Double> iterator = line.iterator(); iterator.hasNext(); ) {
-                double value = iterator.next();
+            for (double value : line) {
                 sb.append(value).append("\t");
             }
             sb.append("\n");
         }
-        if (!Files.exists(Paths.get("temp/pMatrix.txt")))
-            Files.createFile(Paths.get("temp/pMatrix.txt"));
-        Files.write(Paths.get("temp/pMatrix.txt"), sb.toString().getBytes());
+        final Path path = Paths.get(filePath);
+        createFileIfNotExists(path);
+        Files.write(path, sb.toString().getBytes());
     }
 
     // 计算随机游走矩阵即基因之间的相关性得分矩阵*****************************************
-    public static void getRWRMatrix(double arg) throws Exception {
-//        getNetMatrix();
-//        storagePTMatrix();
-//        RandWalk.walk(arg);
+    public static void getRWRMatrix(String gene_type, double arg) throws Exception {
+        getNetMatrix(gene_type);
+        storagePTMatrix(gene_type);
+        RandWalk.walk(gene_type, arg);
     }
 
     // Part2
+    // 数据初始化
     // 获取后代节点
-    private static void getChilds(String goID) {
+    private static void getChildren(String goID) {
         if (!sonsBuff.get(goID).isEmpty()) {
-            for (String go : sonsBuff.get(goID))
-                getChilds(go);
+            for (String go : sonsBuff.get(goID)) {
+                getChildren(go);
+            }
         }
         buff.add(goID);
     }
 
     // 基因本体树构建
-    private static void createGOTree() throws Exception {
+    private static void createGOTree(ArrayList<Term> obo_terms, String gene_type) throws Exception {
         // 生成 son.txt
         sonsBuff = new HashMap<>();
-        ArrayList<String> temp;
-        for (Term term : Reader.readOboFile("data/onto.obo")) {
-            if (term.isObsolote) {
+        for (Term term : obo_terms) {
+            if (term.isObsolete) {
                 continue;
             }
-            if (!sonsBuff.containsKey(term.id))
-                sonsBuff.put(term.id, new ArrayList<>());
-
-            temp = term.isID;
-            for (String parent : temp) {
-                if (!sonsBuff.containsKey(parent))
-                    sonsBuff.put(parent, new ArrayList<>());
+            sonsBuff.putIfAbsent(term.id, new ArrayList<>());
+            // 添加子节点
+            for (String parent : term.isID) {
+                sonsBuff.putIfAbsent(parent, new ArrayList<>());
                 sonsBuff.get(parent).add(term.id);
             }
-            temp = term.partID;
-            for (String parent : temp) {
-                if (!sonsBuff.containsKey(parent))
-                    sonsBuff.put(parent, new ArrayList<>());
+            for (String parent : term.partID) {
+                sonsBuff.putIfAbsent(parent, new ArrayList<>());
                 sonsBuff.get(parent).add(term.id);
             }
         }
-        if (!Files.exists(Paths.get("temp/son.txt")))
-            Files.createFile(Paths.get("temp/son.txt"));
-        for (String parent : sonsBuff.keySet()) {
-            StringBuilder sb = new StringBuilder();
-            sb.append(parent).append(":");
-            for (String child : sonsBuff.get(parent)) {
-                sb.append(child).append("\t");
-            }
-            sb.append("\n");
-            Files.write(Paths.get("temp/son.txt"), sb.toString().getBytes(),
-                    new OpenOption[]{StandardOpenOption.APPEND});
+        // 写入 son.txt
+        createFileIfNotExists(Paths.get("temp/" + gene_type + "/son.txt"));
+        try (BufferedWriter writer = Files.newBufferedWriter(Paths.get("temp/" + gene_type + "/son.txt"))) {
+            WriteChildOrSon(sonsBuff, writer);
         }
-
         // 生成 child.txt
         HashMap<String, ArrayList<String>> childs = new HashMap<>();
         for (String parent : sonsBuff.keySet()) {
-            if (!childs.containsKey(parent))
-                childs.put(parent, new ArrayList<>());
-            temp = sonsBuff.get(parent);
-            for (String child : temp) {
-                getChilds(child);
+            childs.putIfAbsent(parent, new ArrayList<>());
+            for (String child : sonsBuff.get(parent)) {
+                getChildren(child);
             }
             childs.get(parent).addAll(buff);
             buff.clear();
         }
-        if (!Files.exists(Paths.get("temp/child.txt")))
-            Files.createFile(Paths.get("temp/child.txt"));
-        for (String parent : childs.keySet()) {
-            StringBuilder sb = new StringBuilder();
-            sb.append(parent).append(":");
-            for (String child : childs.get(parent)) {
-                sb.append(child).append("\t");
-            }
-            sb.append("\n");
-            Files.write(Paths.get("temp/child.txt"), sb.toString().getBytes(),
-                    new OpenOption[]{StandardOpenOption.APPEND});
+        // 写入 child.txt
+        createFileIfNotExists(Paths.get("temp/" + gene_type + "/child.txt"));
+        try (BufferedWriter writer = Files.newBufferedWriter(Paths.get("temp/" + gene_type + "/child.txt"))) {
+            WriteChildOrSon(childs, writer);
+        }
+    }
+
+    // 写入 child.txt 或 son.txt
+    private static void WriteChildOrSon(HashMap<String, ArrayList<String>> childs, BufferedWriter writer) throws IOException {
+        for (Map.Entry<String, ArrayList<String>> entry : childs.entrySet()) {
+            String parent = entry.getKey();
+            String children = String.join("\t", entry.getValue());
+            writer.write(parent + ":" + children);
+            writer.newLine();
         }
     }
 
     // 相关数据初始化
-    public static void data_initializer() throws Exception {
+    public static void data_initializer(String gene_type, double alpha) throws Exception {
         if (isInit) {
             return;
         }
-
+        // 根据参数修改文件路径
+        ArrayList<String> filePaths = getFilePaths(gene_type);
+        ArrayList<Term> obo_terms = Reader.readOboFile("buf/go-basic.obo");
         // 构建基因本体树相关数据
-//        createGOTree();
+//        createGOTree(obo_terms, gene_type);
 
         // 本体术语项 哈希表 初始化
         idTermHashMap = new HashMap<>();
-        for (Term term : Reader.readOboFile("data/onto.obo")) {
-            if (!term.isObsolote) {
+        for (Term term : obo_terms) {
+            if (!term.isObsolete) {
                 idTermHashMap.put(term.id, term);
             }
         }
-
 
         // 术语网络拓扑图父节点 哈希表 初始化
         idParentsHashMap = new HashMap<>();
         for (String id : idTermHashMap.keySet()) {
             ArrayList<String> parents = new ArrayList<>();
             idParentsHashMap.put(id, parents);
-            //已经添加的术语
+            // 已经添加的术语
             HashSet<String> added = new HashSet<>();
-            //等待添加的术语
-            ArrayList<String> adding = new ArrayList<>();
-            adding.addAll(idTermHashMap.get(id).partID);
+            // 等待添加的术语
+            ArrayList<String> adding = new ArrayList<>(idTermHashMap.get(id).partID);
             adding.addAll(idTermHashMap.get(id).isID);
+
             while (!adding.isEmpty()) {
-                try {
-                    if (!added.contains(adding.get(0))) {
-                        parents.add(adding.get(0));
-                        Term t = idTermHashMap.get(adding.get(0));
-                        if (t.partID != null && !t.partID.isEmpty())
-                            adding.addAll(t.partID);
-                        if (t.isID != null && !t.isID.isEmpty())
-                            adding.addAll(t.isID);
+                String current = adding.remove(0);  // 直接使用remove减少操作
+                if (added.add(current)) {  // 如果未添加则返回true
+                    parents.add(current);
+                    Term t = idTermHashMap.get(current);
+                    if (t != null) {  // 检查术语是否存在
+                        if (t.partID != null) adding.addAll(t.partID);
+                        if (t.isID != null) adding.addAll(t.isID);
                     }
-                    adding.remove(0);
-                } catch (Exception e) {
-                    System.out.println(adding.get(0));
                 }
             }
         }
 
         // 术语网络拓扑图后代节点 哈希表 初始化
         idChildrenHashMap = new HashMap<>();
-        for (String line : Files.readAllLines(Paths.get("temp/child.txt"))) {
+        for (String line : Files.readAllLines(Paths.get("temp/" + gene_type + "/child.txt"))) {
             ArrayList<String> childs = new ArrayList<>();
             if (line.split(":").length > 1) {
                 childs.addAll(Arrays.asList(line.split(":")[1].split("\t")));
@@ -297,7 +313,7 @@ public class Calculator {
 
         // 术语网络拓扑图直接儿子节点 哈希表 初始化
         idSonHashMap = new HashMap<>();
-        for (String line : Files.readAllLines(Paths.get("temp/son.txt"))) {
+        for (String line : Files.readAllLines(Paths.get("temp/" + gene_type + "/son.txt"))) {
             ArrayList<String> sons = new ArrayList<>();
             if (line.split(":").length > 1) {
                 sons.addAll(Arrays.asList(line.split(":")[1].split("\t")));
@@ -306,64 +322,57 @@ public class Calculator {
         }
 
         // 注释文件数据 gene.gaf
-        annotationList = Reader.readGafFile("data/gene.gaf");
+        annotationList = Reader.readGafFile(filePaths.get(2));
 
         // 注释信息数据 哈希表 初始化
         idAnnotationHashMap = new HashMap<>();
         for (Annotation annotation : annotationList) {
-            if (!idAnnotationHashMap.containsKey(annotation.goID))
-                idAnnotationHashMap.put(annotation.goID, new ArrayList<>());
+            idAnnotationHashMap.putIfAbsent(annotation.goID, new ArrayList<>());
             idAnnotationHashMap.get(annotation.goID).add(annotation);
         }
 
         // 基因本体术语与术语注释的基因集间的映射表 初始化
         termToGeneList = new HashMap<>();
         for (Annotation annotation : annotationList) {
-            if (!termToGeneList.containsKey(annotation.goID)) {
-                termToGeneList.put(annotation.goID, new ArrayList<>());
-            }
+            termToGeneList.putIfAbsent(annotation.goID, new ArrayList<>());
             termToGeneList.get(annotation.goID).add(annotation.geneID);
             if (annotation.synonym != null) {
                 termToGeneList.get(annotation.goID).addAll(annotation.synonym);
             }
         }
-        for (String term : termToGeneList.keySet())
+        for (String term : termToGeneList.keySet()) {
             arrayDistinct(termToGeneList.get(term));
+        }
 
         // 基因-基因本体/同义词-基因本体 哈希表 初始化
         geneToTermList = new HashMap<>();
         for (Annotation annotation : annotationList) {
-            if (!geneToTermList.containsKey(annotation.geneID)) {
-                geneToTermList.put(annotation.geneID, new ArrayList<>());
-            }
+            geneToTermList.putIfAbsent(annotation.geneID, new ArrayList<>());
             geneToTermList.get(annotation.geneID).add(annotation.goID);
             if (annotation.synonym != null) {
                 for (String gene : annotation.synonym) {
-                    if (!geneToTermList.containsKey(gene)) {
-                        geneToTermList.put(gene, new ArrayList<>());
-                    }
+                    geneToTermList.putIfAbsent(gene, new ArrayList<>());
                     geneToTermList.get(gene).add(annotation.goID);
                 }
             }
         }
-        for (String gene : geneToTermList.keySet())
+        for (String gene : geneToTermList.keySet()) {
             arrayDistinct(geneToTermList.get(gene));
+        }
 
-        // 基因名称列表 geneList
-        geneList = new ArrayList<>();
-        geneList.addAll(Files.readAllLines(Paths.get("temp/goldList.txt")));
-
-        // 基因相关性得分矩阵数据哈希表 geneSimilarityMatrix
+        // 基因名称列表
+        ArrayList<String> geneNames = new ArrayList<>(Files.readAllLines(Paths.get("temp/" + gene_type + "/geneList.txt")));
+        // 基因相关性得分矩阵数据哈希表
         geneSimilarityHashMap = new HashMap<>();
         int i = 0;
-        for (String line : Files.readAllLines(Paths.get("result/result.mat"))) {
-            int j = 0;
-            for (String value : line.split("\t")) {
-                if (!value.equals("0.0")) {
-                    String key = geneList.get(i) + ":" + geneList.get(j);
-                    geneSimilarityHashMap.put(key, Double.parseDouble(value));
+        for (String line : Files.readAllLines(Paths.get("result/" + gene_type + "/result" + alpha + ".mat"))) {
+            String[] values = line.split("\t");
+            for (int j = 0; j < values.length; j++) {
+                double value = Double.parseDouble(values[j]);
+                if (value != 0.0) {
+                    String key = geneNames.get(i) + ":" + geneNames.get(j);
+                    geneSimilarityHashMap.put(key, value);
                 }
-                j++;
             }
             i++;
         }
@@ -371,58 +380,48 @@ public class Calculator {
     }
 
     // 数组去重
-    private static void arrayDistinct(ArrayList<String> arr) {
+    static void arrayDistinct(ArrayList<String> arr) {
         HashSet<String> set = new HashSet<>(arr);
         arr.clear();
         arr.addAll(set);
     }
 
     // 计算基因间的距离dij
-    private static double get_dij(HashSet<String> set1, HashSet<String> set2) {
-        double sum = 0.0D;
+    private static double get_dij(Set<String> set1, Set<String> set2) {
+        double sum = 0.0;  // 用于存储距离的总和
         for (String gene1 : set1) {
-            double value = 1.0D;
+            double product = 1.0;  // 用于计算每个gene1与set2中所有基因的乘积
             for (String gene2 : set2) {
-                String key = gene1 + ":" + gene2;
                 if (gene1.equals(gene2)) {
-                    value *= 0.0D;
-                } else {
-                    value *= (1.0D - geneSimilarityHashMap.getOrDefault(key, 0.0D));
+                    product = 0; // 不同基因不能相同，如果相同则距离为0
+                    continue; // 下一个基因
                 }
+                // 计算gene1和gene2间的距离
+                double similarity = geneSimilarityHashMap.getOrDefault(gene1 + ":" + gene2, 0.0D);
+                product *= (1.0D - similarity); // 乘积
             }
-            sum += value;
+            sum += product; // 添加当前gene1的乘积到总和
         }
         return sum;
     }
 
     // 计算基因集距离D
-    private static double get_D(String term1, String term2, String gene1, String gene2, HashMap<String, Double> distanceCache) {
-        // 确保使用字典序较小的术语作为键的一部分
-        String key1 = term1.compareTo(term2) < 0 ? term1 : term2;
-        String key2 = term1.compareTo(term2) < 0 ? term2 : term1;
-
-        String distanceKey = key1 + ":" + key2; // 使用统一的距离键
-        if (distanceCache.containsKey(distanceKey)) {
-            return distanceCache.get(distanceKey);
-        }
-        // 使用 HashSet 来存储基因集合
-        HashSet<String> set1 = new HashSet<>(termToGeneList.get(term1));
-        HashSet<String> set2 = new HashSet<>(termToGeneList.get(term2));
-        // 移除基因
+    private static double get_D(String term1, String term2, String gene1, String gene2) {
+        // 获取注释基因集合并转换为Set以去重
+        Set<String> set1 = new HashSet<>(termToGeneList.getOrDefault(term1, new ArrayList<>()));
+        Set<String> set2 = new HashSet<>(termToGeneList.getOrDefault(term2, new ArrayList<>()));
+        // 移除需要比较的基因
         set1.remove(gene1);
         set1.remove(gene2);
         set2.remove(gene1);
         set2.remove(gene2);
-        HashSet<String> sum_set = new HashSet<>();
-        sum_set.addAll(set1);
-        sum_set.addAll(set2);
-        // 计算距离
         // 计算距离
         double dij_12 = get_dij(set1, set2);
         double dij_21 = get_dij(set2, set1);
-        double value = (dij_12 + dij_21) / ((2 * sum_set.size()) - dij_12 - dij_21);
-        distanceCache.put(distanceKey, value);
-        return value;
+        // 计算并集的大小
+        set1.addAll(set2);
+        // 计算D
+        return (dij_12 + dij_21) / (2 * set1.size() - dij_12 - dij_21);
     }
 
     // 获取路径上的基因本体术语节点
@@ -432,143 +431,138 @@ public class Calculator {
             nodes.add(child);
             return nodes;
         }
-        if (idSonHashMap.get(parent) != null) {
-            for (String node : idSonHashMap.get(parent)) {
-                ArrayList<String> childs = idChildrenHashMap.get(node);
-                if (childs != null && childs.contains(child)) {
-                    nodes.add(node);
-                    nodes.addAll(getPathWayTermNode(child, node));
-                }
+        Set<String> visited = new HashSet<>(); // 使用集合避免重复访问
+        getPathWayTermNodeRecursive(child, parent, nodes, visited);
+        return nodes;
+    }
+
+    // 递归获取路径上的基因本体术语节点
+    private static void getPathWayTermNodeRecursive(String child, String parent, List<String> nodes, Set<String> visited) {
+        if (!visited.add(parent)) {
+            return; // 使用 add() 方法，如果已经存在则返回 false
+        }// 标记为已访问
+        for (String node : idSonHashMap.getOrDefault(parent, new ArrayList<>())) {
+            List<String> children = idChildrenHashMap.get(node);
+            if (children != null && children.contains(child)) {
+                nodes.add(node);
+                getPathWayTermNodeRecursive(child, node, nodes, visited);
             }
         }
-        return nodes;
+    }
+
+    // 从路径中获取基因
+    private static void getGenesFromPath(String term, String parent, Set<String> genes) {
+        for (String node : getPathWayTermNode(term, parent)) {
+            ArrayList<String> geneList = termToGeneList.get(node); // 直接进行 null 检查
+            if (geneList != null) {
+                genes.addAll(geneList);
+            }
+        }
     }
 
     // 计算路径约束注释信息U
     private static int get_U(String term1, String term2, String parent, String gene1, String gene2) {
-        HashSet<String> genes = new HashSet<>();
-        ArrayList<String> a_genes = termToGeneList.get(term1);
-        if (a_genes != null)
-            genes.addAll(a_genes);
-        ArrayList<String> b_genes = termToGeneList.get(term2);
-        if (b_genes != null)
-            genes.addAll(b_genes);
-        ArrayList<String> p_genes = termToGeneList.get(parent);
-        if (p_genes != null)
-            genes.addAll(p_genes);
-        // 术语节点a到祖先节点的路径
-        ArrayList<String> pathAP = getPathWayTermNode(term1, parent);
-        for (String node : pathAP) {
-            try {
-                ArrayList<String> tmp_genes = termToGeneList.get(node);
-                if (tmp_genes != null)
-                    genes.addAll(tmp_genes);
-            } catch (Exception e) {
-                System.out.println(e.getMessage());
+        Set<String> genes = new HashSet<>();
+        // 使用一个集合直接添加所有基因
+        for (String term : new String[]{term1, term2, parent}) {
+            ArrayList<String> geneList = termToGeneList.get(term);
+            if (geneList != null) {
+                genes.addAll(geneList);
             }
         }
-        // 术语节点b到祖先节点的路径
-        ArrayList<String> pathBP = getPathWayTermNode(term2, parent);
-        for (String node : pathBP) {
-            try {
-                ArrayList<String> tmp_genes = termToGeneList.get(node);
-                if (tmp_genes != null)
-                    genes.addAll(tmp_genes);
-            } catch (Exception e) {
-                System.out.println(e.getMessage());
-            }
-        }
+        // 添加术语节点a到祖先节点的路径对应基因
+        getGenesFromPath(term1, parent, genes);
+        // 添加术语节点b到祖先节点的路径对应基因
+        getGenesFromPath(term2, parent, genes);
         // 移去比较的两个基因
         genes.remove(gene1);
         genes.remove(gene2);
         return genes.size();
     }
 
-    // 计算两个术语间的相似性（RWRSM）**************************************
-    private static double get_similarity_of_terms(String term1, String term2, String gene1, String gene2, Double distance) {
-        if (idTermHashMap.get(term1) == null || idTermHashMap.get(term2) == null)
-            return 0.0D;
-        if (!(idTermHashMap.get(term1)).namespace.equals((idTermHashMap.get(term2)).namespace))
-            return 0.0D;
-        // 相关参数
-        ArrayList<String> p = new ArrayList<>();
-        for (String id : idParentsHashMap.get(term1)) {
-            if (idParentsHashMap.get(term2).contains(id))
-                p.add(id);
+    // 计算两个术语间的相似性（RWRSM）
+    static double get_similarity_of_terms(String term1, String term2, String gene1, String gene2) {
+        if (!isSameNamespace(term1, term2)) {
+            return 0.0;
         }
-        ArrayList<String> ga = termToGeneList.get(term1);
-        ArrayList<String> gb = termToGeneList.get(term2);
-        int count = (int) annotationList.stream().filter(annotation -> annotation.nameSpace.equals(((Annotation) ((ArrayList) idAnnotationHashMap.get(term1)).get(0)).nameSpace)).count();
-        // 计算距离
-        double dab = distance; // 改成直接读取
+        if (term1.equals(term2)) {
+            return 1.0;
+        }
+
+        Set<String> commonParents = new HashSet<>(idParentsHashMap.get(term1));
+        commonParents.retainAll(idParentsHashMap.get(term2));
+
+        Set<String> ga = new HashSet<>(termToGeneList.get(term1));
+        Set<String> gb = new HashSet<>(termToGeneList.get(term2));
+
+        // 缓存名称空间
+        String nameSpace = idAnnotationHashMap.get(term1) != null ? idAnnotationHashMap.get(term1).get(0).nameSpace : "";
+        int count = (int) annotationList.stream()
+                .filter(annotation -> annotation.nameSpace.equals(nameSpace))
+                .count();
+
+        double dab = get_D(term1, term2, gene1, gene2);
         double dab_2 = dab * dab;
-        double maxSimilarity = 0.0D;
-        // 计算相似度
-        arrayDistinct(p);
-        for (String id : p) {
+        // 计算 h(t1, t2)
+        double h = (dab_2 * count) + ((1 - dab_2) * Math.max(ga.size(), gb.size()));
+        double maxSimilarity = 0.0;
+        for (String id : commonParents) {
             int u = get_U(term1, term2, id, gene1, gene2);
-            double f = dab_2 * u + (1.0D - dab_2) * Math.sqrt((ga.size() * gb.size()));
-            int max_gab = Math.max(ga.size(), gb.size());
-            double h = dab_2 * count + (1.0D - dab_2) * max_gab;
-            int gp = 0;
+            double f = dab_2 * u + (1 - dab_2) * Math.sqrt(ga.size() * gb.size());
+            double gp = 0;
             ArrayList<String> p_genes = new ArrayList<>();
-            if (idChildrenHashMap.get(id) != null) {
-                for (String child_id : idChildrenHashMap.get(id)) {
+            ArrayList<String> childrenIds = idChildrenHashMap.get(id);
+            if (childrenIds != null) {
+                for (String child_id : childrenIds) {
                     ArrayList<String> tmp_genes = termToGeneList.get(child_id);
-                    if (tmp_genes != null)
+                    if (tmp_genes != null) {
                         p_genes.addAll(tmp_genes);
+                    }
                 }
                 arrayDistinct(p_genes);
                 gp = p_genes.size();
             }
-            double similarity = (2.0D * Math.log(count) - 2.0D * Math.log(f)) / (2.0D * Math.log(count) - Math.log(ga.size()) - Math.log(gb.size())) * (1.0D - h * gp / (count * count));
+            double similarity = calculateSimilarity(count, f, h, ga.size(), gb.size(), gp);
             maxSimilarity = Math.max(maxSimilarity, similarity);
         }
-
+        if (maxSimilarity > 1.0) {
+            maxSimilarity = 1.0;
+        }
         return maxSimilarity;
     }
 
+    // 命名空间是否相同
+    private static boolean isSameNamespace(String term1, String term2) {
+        return idTermHashMap.get(term1) != null && idTermHashMap.get(term2) != null &&
+                idTermHashMap.get(term1).namespace.equals(idTermHashMap.get(term2).namespace);
+    }
+
+    // 计算术语和术语集合中术语之间的相似度
+    private static double calculateSimilarity(int count, double f, double h, int gaSize, int gbSize, double gp) {
+        return ((2 * Math.log(count) - 2 * Math.log(f)) / (2 * Math.log(count) - Math.log(gaSize) - Math.log(gbSize))) * (1 - ((h / count) * (gp / count)));
+    }
+
     // Part3
-    // 计算术语和术语集合中术语之间相似度的最大值
-    private static double get_max_similarity_between_go_and_goSet(String goID, ArrayList<String> goSet, String gene1,
-                                                                  String gene2, HashMap<HashSet<String>, Double> computedPairs, HashMap<String, Double> distanceCache) {
-        // 计算所有术语对的基因集距离
-        int size = goSet.size();
-        double[] distance = new double[size];
-        double minDistance = Double.MAX_VALUE;
-        double maxDistance = Double.MIN_VALUE;
-
-
-        // 计算距离并找出最小值和最大值
-        for (int i = 0; i < size; i++) {
-            distance[i] = get_D(goID, goSet.get(i), gene1, gene2, distanceCache);
-            minDistance = Math.min(minDistance, distance[i]);
-            maxDistance = Math.max(maxDistance, distance[i]);
-        }
-
-        // 进行归一化并计算最大相似度
-        double maxSimilarity = 0.0D;
-        if (maxDistance > minDistance) { // 避免除零错误
-            for (int i = 0; i < size; i++) {
-                // 归一化
-                double normalizedValue = (distance[i] - minDistance) / (maxDistance - minDistance);
-                String currentTerm = goSet.get(i);
-                HashSet<String> pairKey = new HashSet<>(Arrays.asList(goID, currentTerm));
-                double tmpSimilarity;
-
-                // 检查是否计算过
+    // 计算术语集合和术语集合中术语之间相似度的最大值
+    private static double get_max_similarity_between_goSet_and_goSet(List<String> mainTerms, List<String> compareTerms, Map<String, Double> computedPairs, String gene1, String gene2) {
+        double maxSum = 0.0;
+        for (String t1 : mainTerms) {
+            double maxSimilarity = 0.0;
+            for (String t2 : compareTerms) {
+                String pairKey = t1.compareTo(t2) < 0 ? t1 + "-" + t2 : t2 + "-" + t1; // 使用字符串作为缓存键
+                double similarity;
+                // 检查缓存
                 if (!computedPairs.containsKey(pairKey)) {
-                    tmpSimilarity = get_similarity_of_terms(goID, currentTerm, gene1, gene2, normalizedValue);
-                    computedPairs.put(pairKey, tmpSimilarity); // 记录计算过的相似度
+                    similarity = Calculator.get_similarity_of_terms(t1, t2, gene1, gene2);
+                    computedPairs.put(pairKey, similarity);
                 } else {
-                    tmpSimilarity = computedPairs.get(pairKey); // 使用缓存的结果
+                    similarity = computedPairs.get(pairKey);
                 }
-                maxSimilarity = Math.max(maxSimilarity, tmpSimilarity);
+                maxSimilarity = Math.max(maxSimilarity, similarity);
             }
-        } else {
-            maxSimilarity = 0.0D;
+            maxSum += maxSimilarity; // 计算最大相似度求和
         }
-        return maxSimilarity;
+        return maxSum;
     }
 
     // 计算两个基因间的相似性GS**********************************************
@@ -577,147 +571,129 @@ public class Calculator {
         ArrayList<String> terms1 = geneToTermList.get(gene1);
         ArrayList<String> terms2 = geneToTermList.get(gene2);
         if (terms1 == null || terms2 == null) {
-            return 0.0D;
+            return 0;
         }
-
-        // 用于存储计算过的相似度
-        HashMap<HashSet<String>, Double> computedPairs = new HashMap<>();
-        // 计算距离缓存
-        HashMap<String, Double> distanceCache = new HashMap<>();
-        double termSimilaritySum = 0.0D;
-
-        // 计算 termSimilaritySum
-        for (String id : terms1) {
-            termSimilaritySum += get_max_similarity_between_go_and_goSet(id, terms2, gene1, gene2, computedPairs, distanceCache);
-        }
-        for (String id : terms2) {
-            termSimilaritySum += get_max_similarity_between_go_and_goSet(id, terms1, gene1, gene2, computedPairs, distanceCache);
-        }
-
+        // 缓存用于存储计算过的相似度
+        double sumSimilarities = 0.0;
+        Map<String, Double> computedPairs = new ConcurrentHashMap<>();
+        // 计算术语和术语集合之间的相似度
+        sumSimilarities += get_max_similarity_between_goSet_and_goSet(terms1, terms2, computedPairs, gene1, gene2);
+        sumSimilarities += get_max_similarity_between_goSet_and_goSet(terms2, terms1, computedPairs, gene1, gene2);
         // 基因相似度计算
-        return termSimilaritySum / (terms1.size() + terms2.size());
+        return sumSimilarities / (terms1.size() + terms2.size());
     }
 
     // Part4
     // LFC得分计算器
     static class Evaluator {
         // 根据ec编号计算LFC得分的接口*************************************
-        public static void LFC() throws Exception {
-            init();
-
-            if (!Files.exists(Paths.get("result/lfc.txt")))
-                Files.createFile(Paths.get("result/lfc.txt"));
-
-            long s = System.currentTimeMillis();
-            int number = 1;
-            for (String ec : Calculator.ecNumGeneHashMap.keySet()) {
-                System.out.println("开始计算第" + number + "个ec分组的得分");
-                long start = System.currentTimeMillis();
-
+        public static void LFC(String gene_type, double alpha) throws Exception {
+            ArrayList<String> filePaths = getFilePaths(gene_type);
+            final Path path = Paths.get("result/" + gene_type + "/lfc" + alpha + ".txt");
+            createFileIfNotExists(path);
+            init(gene_type, filePaths, alpha);
+            // 使用 TRUNCATE_EXISTING 确保覆盖原有内容
+            Files.write(path, new byte[0], StandardOpenOption.TRUNCATE_EXISTING); // 先清空文件内容
+            // 计算LFC得分
+            for (String ec : ecNumGeneHashMap.keySet()) {
                 double lfc = get_lfc(ec);
-                Files.write(Paths.get("result/lfc.txt"), (ec + "\t\t" + lfc + "\n").getBytes(),
-                        new OpenOption[]{StandardOpenOption.APPEND});
-
-                long end = System.currentTimeMillis();
-                System.out.println(
-                        "已算完第" + number++ + "个ec分组的得分," + "耗时:" + (end - start) + "ms,总耗时:" + (end - s) + "ms");
+                Files.write(path, (ec + "\t\t" + lfc + "\n").getBytes(),
+                        StandardOpenOption.APPEND);
             }
         }
 
-        // 获取ej
-        private static ArrayList<HashSet<String>> get_ej_set(HashSet<String> ei) {
+        // 获取只有ei才有的基因集合ej
+        private static ArrayList<HashSet<String>> getNotInterSet(HashSet<String> eiSet) {
             ArrayList<HashSet<String>> result = new ArrayList<>();
-            for (String ec : Calculator.ecNumGeneHashMap.keySet()) {
-                HashSet<String> ej = Calculator.ecNumGeneHashMap.get(ec);
+            for (String ec : ecNumGeneHashMap.keySet()) {
+                HashSet<String> ej = ecNumGeneHashMap.get(ec);
                 boolean flag = true;
                 for (String gene : ej) {
-                    if (ei.contains(gene)) {
+                    if (eiSet.contains(gene)) {
                         flag = false;
                         break;
                     }
                 }
-                if (flag)
+                if (flag) {
                     result.add(ej);
+                }
             }
             return result;
         }
 
         // 计算差异对数diff
         private static double get_diff(String gene, HashSet<String> ei, HashSet<String> ej) {
-            if (gene == null || ei == null || ej == null) {
-                throw new IllegalArgumentException("输入参数不能为null");
-            }
-            Double value = similarityResult.get(gene + ":" + ej);
-            if (value == null) {
-                // 处理相似度未找到的情况，例如返回0, 或抛出异常
+            double top_value = calculateValue(gene, ej, ei.size());
+            double bottom_value = calculateValue(gene, ei, ej.size());
+
+            // 确保 top_value 和 bottom_value 都大于0，以防止 log 计算出错
+            top_value = Math.max(top_value, 1.0E-10);
+            bottom_value = Math.max(bottom_value, 1.0E-10);
+            if (bottom_value == 0.0) {
                 return 0.0;
             }
-            double top_value = 0.0D;
-            double bottom_value = 0.0D;
-            double c = 1.0E-10D; // 拉普拉斯平滑参数
-
-            for (String gj : ej) {
-                top_value += (1 - similarityResult.get(gene + ":" + gj) + c);
-            }
-            top_value *= ei.size();
-            for (String gi : ei) {
-                bottom_value += (1 - similarityResult.get(gene + ":" + gi) + c);
-            }
-            bottom_value *= ej.size();
-
+            // if (result < 0) {
+//                System.out.print(" < 0: " + gene + " " + ei + " / " + ej + top_value + " / " + bottom_value);
+//                return 0;
+//            }
+//            if (result > 1) {
+//                System.out.print(" > 1: " + gene + " " + ei + " / " + ej + "\n");
+//                return 1;
+//            }
             return Math.log(top_value / bottom_value);
+        }
+
+        // 提取相似度计算的方法
+        private static double calculateValue(String gene, HashSet<String> set, int sizeFactor) {
+            double value = 0.0;
+            for (String g : set) {
+                value += (1 - getSimilarity(gene, g) + 1.0E-10);
+            }
+            return value * sizeFactor;
+        }
+
+        // 获取相似度，考虑顺序对称性
+        private static double getSimilarity(String gene, String otherGene) {
+            Double similarityValue = similarityResult.get(gene + ":" + otherGene);
+            if (similarityValue == null) {
+                similarityValue = similarityResult.get(otherGene + ":" + gene);
+            }
+            return similarityValue != null ? Math.max(similarityValue, 0.0) : 0.0; // 默认返回0.0
         }
 
         // 计算LFC得分
         private static double get_lfc(String ecNumber) {
-            HashSet<String> ei = Calculator.ecNumGeneHashMap.get(ecNumber);
-            if (ei == null) {
-                // 处理未找到的情况，例如返回默认值，抛出异常等
-                return 0.0;
-            }
-            ArrayList<HashSet<String>> ec = get_ej_set(ei);
+            HashSet<String> ei = ecNumGeneHashMap.get(ecNumber);
+            // 获取不相交ej集
+            ArrayList<HashSet<String>> ecSet = getNotInterSet(ei);
             double value = 0.0D;
-            for (HashSet<String> ej : ec) {
+            for (HashSet<String> ej : ecSet) {
                 double sum = 0.0D;
-                for (String gene : ei)
+                for (String gene : ei) {
                     sum += get_diff(gene, ei, ej);
+                }
                 value += sum / ei.size();
             }
-            double num_ec = Calculator.ecNumGeneHashMap.size();
-            return value / num_ec;
+            double num_ec = ecNumGeneHashMap.size(); // |EC|
+            return value / Math.max(num_ec, 1); // 防止除以0
         }
 
         // 相关初始化
-        private static void init() throws Exception {
+        private static void init(String gene_type, ArrayList<String> filePaths, double alpha) throws Exception {
             // 基因相似度结果 哈希表 初始化
-            similarityResult = new HashMap<>();
-            for (String line : Files.readAllLines(Paths.get("result/similarityResult.txt"))) {
-                String gene1 = line.split("\t")[0];
-                String gene2 = line.split("\t")[1];
-                Double value = Double.parseDouble(line.split("\t")[2]);
-                similarityResult.put(gene1 + ":" + gene2, value);
+            similarityResult = Reader.getSimilarityResult(gene_type, alpha);
+            // 基因证据ec编号 哈希表 初始化
+            switch (gene_type) {
+                case "Yeast":
+                    ecNumGeneHashMap = Reader.getYeastEcNumGeneHashMap(filePaths);
+                    break;
+                case "Human":
+                    ecNumGeneHashMap = Reader.getHumanEcNumGeneHashMap(filePaths);
+                    break;
+                case "Arabidopsis_thaliana":
+                    ecNumGeneHashMap = Reader.getArabidopsisEcNumGeneHashMap(filePaths);
+                    break;
             }
-
-            // 基因证据编号 哈希表 初始化
-            ecNumGeneHashMap = new HashMap<>();
-            for (String line : Files.readAllLines(Paths.get("data/ec.tab"))) {
-                String[] values = line.split("\t");
-                if (values.length < 4)
-                    continue;
-                String ec = values[2];
-                String gene = values[3];
-                if (!ecNumGeneHashMap.containsKey(ec))
-                    ecNumGeneHashMap.put(ec, new HashSet<>());
-                ecNumGeneHashMap.get(ec).add(gene);
-            }
-            HashMap<String, HashSet<String>> tmp = new HashMap<>();
-            for (String ec : ecNumGeneHashMap.keySet()) {
-                if (ecNumGeneHashMap.get(ec).size() > 1)
-                    tmp.put(ec, ecNumGeneHashMap.get(ec));
-            }
-            ecNumGeneHashMap.clear();
-            ecNumGeneHashMap.putAll(tmp);
-            ecNumGeneHashMap.remove("");
         }
     }
 
