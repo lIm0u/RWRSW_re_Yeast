@@ -5,7 +5,6 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 
 import static java.lang.Math.pow;
 
@@ -14,6 +13,8 @@ public class Calculator {
     static HashMap<String, Double> netHashMap; // 原始网络数据 对应net.txt文件 存储为gene1:gene2 value
     static ArrayList<String> geneList; // 基因列表 本应来自net.txt文件，此处由于进一步筛选因此直接从geneList.txt读入
     static ArrayList<ArrayList<Double>> netMatrix; // 原始网络矩阵,数值来自netHashMap，行列坐标来自geneList
+    static HashMap<String, Integer> geneIndexMap; // 基因索引映射表
+    static double[][] geneSimilarityMatrix; // 随机游走的基因相关性得分矩阵
     static HashMap<String, Double> geneSimilarityHashMap; // 随机游走的基因相关性得分矩阵数据哈希表
     static HashMap<String, ArrayList<String>> sonsBuff; // 直接后代子节点缓冲区
     static ArrayList<Annotation> annotationList; // gene.gaf 注释文件数据
@@ -330,62 +331,54 @@ public class Calculator {
         // 注释文件数据 gene.gaf
         annotationList = Reader.readGafFile(filePaths.get(2));
 
-        // 注释信息数据 哈希表 初始化
+        // 初始化注释信息数据哈希表、术语与基因集的映射表、基因与术语的映射表
         idAnnotationHashMap = new HashMap<>();
-        for (Annotation annotation : annotationList) {
-            idAnnotationHashMap.putIfAbsent(annotation.goID, new ArrayList<>());
-            idAnnotationHashMap.get(annotation.goID).add(annotation);
-        }
-
-        // 基因本体术语与术语注释的基因集间的映射表 初始化
         termToGeneList = new HashMap<>();
+        geneToTermList = new HashMap<>();
+
         for (Annotation annotation : annotationList) {
-            termToGeneList.putIfAbsent(annotation.goID, new ArrayList<>());
-            termToGeneList.get(annotation.goID).add(annotation.geneID);
+            // 填充 idAnnotationHashMap
+            idAnnotationHashMap.computeIfAbsent(annotation.goID, k -> new ArrayList<>()).add(annotation);
+
+            // 填充 termToGeneList
+            termToGeneList.computeIfAbsent(annotation.goID, k -> new ArrayList<>()).add(annotation.geneID);
             if (annotation.synonym != null) {
                 termToGeneList.get(annotation.goID).addAll(annotation.synonym);
             }
-        }
-        for (String term : termToGeneList.keySet()) {
-            arrayDistinct(termToGeneList.get(term));
-        }
 
-        // 基因-基因本体/同义词-基因本体 哈希表 初始化
-        geneToTermList = new HashMap<>();
-        for (Annotation annotation : annotationList) {
-            geneToTermList.putIfAbsent(annotation.geneID, new ArrayList<>());
-            geneToTermList.get(annotation.geneID).add(annotation.goID);
+            // 填充 geneToTermList
+            geneToTermList.computeIfAbsent(annotation.geneID, k -> new ArrayList<>()).add(annotation.goID);
             if (annotation.synonym != null) {
                 for (String gene : annotation.synonym) {
-                    geneToTermList.putIfAbsent(gene, new ArrayList<>());
-                    geneToTermList.get(gene).add(annotation.goID);
+                    geneToTermList.computeIfAbsent(gene, k -> new ArrayList<>()).add(annotation.goID);
                 }
             }
         }
-        for (String gene : geneToTermList.keySet()) {
-            arrayDistinct(geneToTermList.get(gene));
-        }
+
+        // 去重处理
+        termToGeneList.forEach((term, genes) -> arrayDistinct(genes));
+        geneToTermList.forEach((gene, terms) -> arrayDistinct(terms));
 
         // 基因名称列表
         geneList = new ArrayList<>(Files.readAllLines(Paths.get("temp/" + gene_type + "/geneList.txt")));
-
-        // 基因相关性得分矩阵数据哈希表
-        geneSimilarityHashMap = new HashMap<>();
+        int size = geneList.size();
+        // 初始化基因名称到索引的映射
+        geneIndexMap = new HashMap<>();
+        for (int i = 0; i < size; i++) {
+            geneIndexMap.put(geneList.get(i), i);
+        }
+        // 初始化基因相关性得分矩阵
+        geneSimilarityMatrix = new double[size][size];
+        // 读取矩阵数据并填充二维数组
         List<String> lines = Files.readAllLines(Paths.get("result/" + gene_type + "/result" + alpha + ".mat"));
-        int i = 0;
-        StringBuilder keyBuilder = new StringBuilder();
-        for (String line : lines) {
-            String[] values = line.split("\t");
+        for (int i = 0; i < lines.size(); i++) {
+            String[] values = lines.get(i).split("\t");
             for (int j = 0; j < values.length; j++) {
                 double value = Double.parseDouble(values[j]);
                 if (value != 0.0) {
-                    keyBuilder.setLength(0); // 清空 StringBuilder
-                    keyBuilder.append(geneList.get(i)).append(":").append(geneList.get(j));
-                    String key = keyBuilder.toString();
-                    geneSimilarityHashMap.put(key, value);
+                    geneSimilarityMatrix[i][j] = value; // 填充矩阵
                 }
             }
-            i++;
         }
 
         // 确保相关性矩阵数据初始化
@@ -400,25 +393,6 @@ public class Calculator {
         arr.addAll(set);
     }
 
-    // 计算基因间的距离dij
-    private static double get_dij(HashSet<String> set1, HashSet<String> set2) {
-        double sum = 0.0;  // 用于存储距离的总和
-        for (String gene1 : set1) {
-            double value = 1.0;  // 用于计算每个gene1与set2中所有基因的乘积
-            for (String gene2 : set2) {
-                if (gene1.equals(gene2)) {
-                    value = 0.0;  // 两个基因相同，距离为0
-                    break;
-                }
-                // 获取gene1和gene2间的距离：dij = 1 - sim(gene1, gene2)
-                double similarity = geneSimilarityHashMap.getOrDefault(gene1 + ":" + gene2, 0.0);
-                value *= (1.0D - similarity);
-            }
-            sum += value; // 添加当前gene1的乘积到总和
-        }
-        return sum;
-    }
-
     // 计算基因集距离D
     private static double get_D(String term1, String term2, String gene1, String gene2) {
         // 获取注释基因集合并转换为Set以去重
@@ -429,17 +403,48 @@ public class Calculator {
         set1.remove(gene2);
         set2.remove(gene1);
         set2.remove(gene2);
-        HashSet<String> set3 = new HashSet<>(set1);
-        // 计算并集的大小
-        set3.addAll(set2);
-        // 移除set1和set2中的无效基因
-        set1.removeIf(gene -> !geneList.contains(gene));
-        set2.removeIf(gene -> !geneList.contains(gene));
+
+        // 使用 List 而不是 Set，以提高索引访问速度
+        List<String> list1 = new ArrayList<>(set1);
+        List<String> list2 = new ArrayList<>(set2);
+
         // 计算距离
-        double dij_12 = get_dij(set1, set2);
-        double dij_21 = get_dij(set2, set1);
-        // 计算D
-        return (dij_12 + dij_21) / (2 * set3.size() - dij_12 - dij_21);
+        double dij_12 = get_dij(list1, list2);
+        double dij_21 = get_dij(list2, list1);
+        // 计算并集
+        set1.addAll(set2);
+        return (dij_12 + dij_21) / (2 * set1.size() - dij_12 - dij_21);
+    }
+
+    // 计算基因间的距离dij
+    private static double get_dij(List<String> set1, List<String> set2) {
+        double sum = 0.0;  // 用于存储距离的总和
+        double similarity;
+        for (String gene1 : set1) {
+            double value = 1.0;  // 用于计算每个gene1与set2中所有基因的乘积
+            int index1 = geneIndexMap.getOrDefault(gene1, -1); // 获取gene1的索引
+            if (index1 == -1) { // 存在不存在的基因
+                sum += value;
+                continue;
+            }
+            for (String gene2 : set2) {
+                if (gene1.equals(gene2)) {
+                    value = 0.0;  // 两个基因相同，距离为0
+                    break;
+                }
+                int index2 = geneIndexMap.getOrDefault(gene2, -1); // 获取gene2的索引
+                if (index2 == -1) { // 存在不存在的基因
+                    similarity = 0.0;
+                }
+                else {
+                    // 获取gene1和gene2间的距离：dij = 1 - sim(gene1, gene2)
+                    similarity = geneSimilarityMatrix[index1][index2];
+                }
+                value *= (1.0D - similarity);
+            }
+            sum += value; // 添加当前gene1的乘积到总和
+        }
+        return sum;
     }
 
     // 计算路径约束注释信息U
@@ -496,9 +501,14 @@ public class Calculator {
     // 递归获取路径上的基因本体术语节点
     private static void getPathWayTermNodeRecursive(String child, String parent, List<String> nodes, Set<String> visited) {
         if (!visited.add(parent)) return; // 标记为已访问
+        // 获取当前节点的子节点列表
+        List<String> children = idSonHashMap.getOrDefault(parent, new ArrayList<>());
         // 遍历子节点
-        for (String node : idSonHashMap.getOrDefault(parent, new ArrayList<>())) {
-            if (idChildrenHashMap.get(node) != null && idChildrenHashMap.get(node).contains(child)) {
+        for (String node : children) {
+            // 获取当前节点对应的子集合，使用 HashSet 提高查找效率
+            Set<String> childSet = new HashSet<>(idChildrenHashMap.getOrDefault(node, new ArrayList<>()));
+            // 遍历子集合，查找与当前节点相连的子节点
+            if (childSet.contains(child)) {
                 nodes.add(node);
                 getPathWayTermNodeRecursive(child, node, nodes, visited);
             }
@@ -543,6 +553,7 @@ public class Calculator {
             Set<String> p_genes = new HashSet<>(); // 使用 HashSet 来自动去重
             ArrayList<String> childrenIds = idChildrenHashMap.get(id);
             if (childrenIds != null) {
+                // 将所有子节点的基因收集到 p_genes 中
                 for (String child_id : childrenIds) {
                     ArrayList<String> tmp_genes = termToGeneList.get(child_id);
                     if (tmp_genes != null) {
@@ -573,7 +584,7 @@ public class Calculator {
 
     // Part3
     // 计算术语集合和术语集合中术语之间相似度的最大值
-    private static double get_max_similarity_between_goSet_and_goSet(List<String> mainTerms, List<String> compareTerms, Map<String, Double> computedPairs, String gene1, String gene2) {
+    private static double get_max_similarity_between_goSet_and_goSet(List<String> mainTerms, List<String> compareTerms, HashMap<String, Double> computedPairs, String gene1, String gene2) {
         double maxSum = 0.0;
         for (String t1 : mainTerms) {
             double maxSimilarity = 0.0;
@@ -604,7 +615,7 @@ public class Calculator {
         }
         // 缓存用于存储计算过的相似度
         double sumSimilarities = 0.0;
-        Map<String, Double> computedPairs = new ConcurrentHashMap<>();
+        HashMap<String, Double> computedPairs = new HashMap<>();
         // 计算术语和术语集合之间的相似度
         sumSimilarities += get_max_similarity_between_goSet_and_goSet(terms1, terms2, computedPairs, gene1, gene2);
         sumSimilarities += get_max_similarity_between_goSet_and_goSet(terms2, terms1, computedPairs, gene1, gene2);
