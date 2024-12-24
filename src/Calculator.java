@@ -15,12 +15,12 @@ public class Calculator {
     static ArrayList<ArrayList<Double>> netMatrix; // 原始网络矩阵,数值来自netHashMap，行列坐标来自geneList
     static HashMap<String, Integer> geneIndexMap; // 基因索引映射表
     static double[][] geneSimilarityMatrix; // 随机游走的基因相关性得分矩阵
-    static HashMap<String, Double> geneSimilarityHashMap; // 随机游走的基因相关性得分矩阵数据哈希表
     static HashMap<String, ArrayList<String>> sonsBuff; // 直接后代子节点缓冲区
     static ArrayList<Annotation> annotationList; // gene.gaf 注释文件数据
     static HashMap<String, ArrayList<String>> termToGeneList; // 本体术语-->术语注释的基因集间的映射表
     static HashMap<String, ArrayList<String>> idParentsHashMap; // 术语网络拓扑图父节点 哈希表: key=本体id value=本体结构信息
     static HashMap<String, ArrayList<String>> idChildrenHashMap; // 术语网络拓扑图后代节点 哈希表: key=本体id value=本体结构信息
+    static HashMap<String, Set<String>> childrenGenesMap; // 直接后代基因集合 哈希表: key=基因 value=直接后代基因集合
     static HashMap<String, ArrayList<String>> idSonHashMap; // 术语网络拓扑图直接儿子节点 哈希表: key=本体id value=本体结构信息
     static HashMap<String, Term> idTermHashMap; // 本体术语项 哈希表: key=基因本体id value=基因本体结构信息
     static HashMap<String, ArrayList<Annotation>> idAnnotationHashMap; // 注释信息数据 哈希表: key=本体ID value=注释信息
@@ -282,7 +282,7 @@ public class Calculator {
         ArrayList<String> filePaths = getFilePaths(gene_type);
         ArrayList<Term> obo_terms = Reader.readOboFile("buf/go-basic.obo");
         // 构建基因本体树相关数据
-//        createGOTree(obo_terms, gene_type);
+        createGOTree(obo_terms, gene_type);
 
         // 本体术语项 哈希表 初始化
         idTermHashMap = new HashMap<>();
@@ -302,7 +302,6 @@ public class Calculator {
             // 等待添加的术语
             ArrayList<String> adding = new ArrayList<>(idTermHashMap.get(id).partID);
             adding.addAll(idTermHashMap.get(id).isID);
-
             while (!adding.isEmpty()) {
                 String current = adding.remove(0);  // 直接使用remove减少操作
                 if (added.add(current)) {  // 如果未添加则返回true
@@ -329,7 +328,10 @@ public class Calculator {
         }
 
         // 注释文件数据 gene.gaf
-        annotationList = Reader.readGafFile(filePaths.get(2));
+        annotationList = Reader.readGafFile(filePaths.get(2), gene_type);
+
+        // ecNumGeneHashMap 基因证据编号 哈希表 初始化
+        ecNumGeneHashMap = LfcPair.getLfc(gene_type);
 
         // 初始化注释信息数据哈希表、术语与基因集的映射表、基因与术语的映射表
         idAnnotationHashMap = new HashMap<>();
@@ -359,13 +361,42 @@ public class Calculator {
         termToGeneList.forEach((term, genes) -> arrayDistinct(genes));
         geneToTermList.forEach((gene, terms) -> arrayDistinct(terms));
 
+        // 在初始化时填充所有子节点基因
+        childrenGenesMap = new HashMap<>();
+        for (String id : idChildrenHashMap.keySet()) {
+            List<String> childrenIds = idChildrenHashMap.get(id);
+            Set<String> genesSet = new HashSet<>();
+            for (String child_id : childrenIds) {
+                List<String> tmp_genes = termToGeneList.get(child_id);
+                if (tmp_genes != null) {
+                    genesSet.addAll(tmp_genes);
+                }
+            }
+            childrenGenesMap.put(id, genesSet);
+        }
+
         // 基因名称列表
         geneList = new ArrayList<>(Files.readAllLines(Paths.get("temp/" + gene_type + "/geneList.txt")));
         int size = geneList.size();
-        // 初始化基因名称到索引的映射
-        geneIndexMap = new HashMap<>();
-        for (int i = 0; i < size; i++) {
-            geneIndexMap.put(geneList.get(i), i);
+        // 基因名称到索引的映射
+        if (gene_type.equals("Human")) {
+            // 根据映射文件获取标识符与基因的映射关系
+            HashMap<String, String> idGeneHashMap = new HashMap<>();
+            for (String line : Files.readAllLines(Paths.get("buf/Human/id_symbol.map"))) {
+                String[] values = line.split("\t");
+                idGeneHashMap.put(values[0], values[1]);
+            }
+            // 初始化基因的标识符到索引的映射
+            geneIndexMap = new HashMap<>();
+            for (int i = 0; i < size; i++) {
+                geneIndexMap.put(idGeneHashMap.get(geneList.get(i)), i);
+            }
+        } else {
+            // 初始化基因名称（标识符）到索引的映射
+            geneIndexMap = new HashMap<>();
+            for (int i = 0; i < size; i++) {
+                geneIndexMap.put(geneList.get(i), i);
+            }
         }
         // 初始化基因相关性得分矩阵
         geneSimilarityMatrix = new double[size][size];
@@ -375,9 +406,7 @@ public class Calculator {
             String[] values = lines.get(i).split("\t");
             for (int j = 0; j < values.length; j++) {
                 double value = Double.parseDouble(values[j]);
-                if (value != 0.0) {
-                    geneSimilarityMatrix[i][j] = value; // 填充矩阵
-                }
+                geneSimilarityMatrix[i][j] = value; // 填充矩阵
             }
         }
 
@@ -403,43 +432,32 @@ public class Calculator {
         set1.remove(gene2);
         set2.remove(gene1);
         set2.remove(gene2);
-
-        // 使用 List 而不是 Set，以提高索引访问速度
-        List<String> list1 = new ArrayList<>(set1);
-        List<String> list2 = new ArrayList<>(set2);
-
         // 计算距离
-        double dij_12 = get_dij(list1, list2);
-        double dij_21 = get_dij(list2, list1);
+        double dij_12 = get_dij(set1, set2);
+        double dij_21 = get_dij(set2, set1);
         // 计算并集
         set1.addAll(set2);
         return (dij_12 + dij_21) / (2 * set1.size() - dij_12 - dij_21);
     }
 
     // 计算基因间的距离dij
-    private static double get_dij(List<String> set1, List<String> set2) {
+    private static double get_dij(HashSet<String> set1, HashSet<String> set2) {
         double sum = 0.0;  // 用于存储距离的总和
         double similarity;
         for (String gene1 : set1) {
             double value = 1.0;  // 用于计算每个gene1与set2中所有基因的乘积
             int index1 = geneIndexMap.getOrDefault(gene1, -1); // 获取gene1的索引
-            if (index1 == -1) { // 存在不存在的基因
-                sum += value;
-                continue;
-            }
             for (String gene2 : set2) {
                 if (gene1.equals(gene2)) {
-                    value = 0.0;  // 两个基因相同，距离为0
+                    value = 0.0; // 两个基因相同，距离为0，接下来无论如何遍历value都是0
                     break;
                 }
                 int index2 = geneIndexMap.getOrDefault(gene2, -1); // 获取gene2的索引
-                if (index2 == -1) { // 存在不存在的基因
-                    similarity = 0.0;
+                if (index1 == -1 || index2 == -1) { // 存在不存在的基因
+                    continue;
                 }
-                else {
-                    // 获取gene1和gene2间的距离：dij = 1 - sim(gene1, gene2)
-                    similarity = geneSimilarityMatrix[index1][index2];
-                }
+                // 获取gene1和gene2间的距离：dij = 1 - sim(gene1, gene2)
+                similarity = geneSimilarityMatrix[index1][index2];
                 value *= (1.0D - similarity);
             }
             sum += value; // 添加当前gene1的乘积到总和
@@ -486,33 +504,36 @@ public class Calculator {
         }
     }
 
-    // 获取路径上的基因本体术语节点
+    // 迭代获取路径上的基因本体术语节点（深度优先搜索）
     private static List<String> getPathWayTermNode(String child, String parent) {
         List<String> nodes = new ArrayList<>();
         if (child.equals(parent)) {
             nodes.add(child);
             return nodes;
         }
-        Set<String> visited = new HashSet<>();
-        getPathWayTermNodeRecursive(child, parent, nodes, visited);
-        return nodes;
-    }
 
-    // 递归获取路径上的基因本体术语节点
-    private static void getPathWayTermNodeRecursive(String child, String parent, List<String> nodes, Set<String> visited) {
-        if (!visited.add(parent)) return; // 标记为已访问
-        // 获取当前节点的子节点列表
-        List<String> children = idSonHashMap.getOrDefault(parent, new ArrayList<>());
-        // 遍历子节点
-        for (String node : children) {
-            // 获取当前节点对应的子集合，使用 HashSet 提高查找效率
-            Set<String> childSet = new HashSet<>(idChildrenHashMap.getOrDefault(node, new ArrayList<>()));
-            // 遍历子集合，查找与当前节点相连的子节点
-            if (childSet.contains(child)) {
-                nodes.add(node);
-                getPathWayTermNodeRecursive(child, node, nodes, visited);
+        Set<String> visited = new HashSet<>();
+        Stack<String> stack = new Stack<>();
+        stack.push(parent);
+        while (!stack.isEmpty()) {
+            String current = stack.pop();
+
+            if (visited.add(current)) { // 标记为已访问
+                // 获取当前节点的子节点列表
+                List<String> children = idSonHashMap.getOrDefault(current, new ArrayList<>());
+                // 遍历子节点
+                for (String node : children) {
+                    // 获取当前节点对应的子集合，使用 HashSet 提高查找效率
+                    Set<String> childSet = new HashSet<>(idChildrenHashMap.getOrDefault(node, new ArrayList<>()));
+                    // 检查是否有与当前节点相连的子节点
+                    if (childSet.contains(child)) {
+                        nodes.add(node);
+                        stack.push(node); // 将当前节点加入栈中进行后续处理
+                    }
+                }
             }
         }
+        return nodes;
     }
 
     // 计算两个术语间的相似性（RWRSM）
@@ -523,12 +544,6 @@ public class Calculator {
         if (term1.equals(term2)) {
             return 1.0;
         }
-
-        Set<String> commonParents = new HashSet<>(idParentsHashMap.get(term1));
-        commonParents.retainAll(idParentsHashMap.get(term2));
-
-        Set<String> ga = new HashSet<>(termToGeneList.get(term1));
-        Set<String> gb = new HashSet<>(termToGeneList.get(term2));
 
         // 缓存名称空间
         List<Annotation> annotations = idAnnotationHashMap.get(term1);
@@ -543,30 +558,26 @@ public class Calculator {
         // 计算 D(t1, t2)
         double dab = get_D(term1, term2, gene1, gene2);
         double dab_2 = dab * dab;
+
+        Set<String> ga = new HashSet<>(termToGeneList.get(term1));
+        Set<String> gb = new HashSet<>(termToGeneList.get(term2));
+        int gaSize = ga.size();
+        int gbSize = gb.size();
         // 计算 h(t1, t2)
-        double h = (dab_2 * count) + ((1 - dab_2) * Math.max(ga.size(), gb.size()));
+        double h = (dab_2 * count) + ((1 - dab_2) * Math.max(gaSize, gbSize));
+
+        Set<String> commonParents = new HashSet<>(idParentsHashMap.get(term1));
+        commonParents.retainAll(idParentsHashMap.get(term2));
         double maxSimilarity = 0.0;
         for (String id : commonParents) {
             int u = get_U(term1, term2, id, gene1, gene2);
-            double f = dab_2 * u + (1 - dab_2) * Math.sqrt(ga.size() * gb.size());
-            double gp = 0;
-            Set<String> p_genes = new HashSet<>(); // 使用 HashSet 来自动去重
-            ArrayList<String> childrenIds = idChildrenHashMap.get(id);
-            if (childrenIds != null) {
-                // 将所有子节点的基因收集到 p_genes 中
-                for (String child_id : childrenIds) {
-                    ArrayList<String> tmp_genes = termToGeneList.get(child_id);
-                    if (tmp_genes != null) {
-                        p_genes.addAll(tmp_genes);
-                    }
-                }
-                gp = p_genes.size();
-            }
-            double similarity = calculateSimilarity(count, f, h, ga.size(), gb.size(), gp);
+            double f = dab_2 * u + (1 - dab_2) * Math.sqrt(gaSize * gbSize);
+            // 直接从预处理结果中获取基因
+            Set<String> p_genes = childrenGenesMap.get(id);
+            double gp = (p_genes != null) ? p_genes.size() : 0;
+            // 计算相似度
+            double similarity = calculateSimilarity(count, f, h, gaSize, gbSize, gp);
             maxSimilarity = Math.max(maxSimilarity, similarity);
-        }
-        if (maxSimilarity > 1.0) {
-            maxSimilarity = 1.0;
         }
         return maxSimilarity;
     }
@@ -628,34 +639,31 @@ public class Calculator {
     static class Evaluator {
         // 根据ec编号计算LFC得分的接口*************************************
         public static void LFC(String gene_type, double alpha) throws Exception {
-            ArrayList<String> filePaths = getFilePaths(gene_type);
             final Path path = Paths.get("result/" + gene_type + "/lfc" + alpha + ".txt");
             createFileIfNotExists(path);
-            init(gene_type, filePaths, alpha);
+            init(gene_type, alpha);
             // 使用 TRUNCATE_EXISTING 确保覆盖原有内容
             Files.write(path, new byte[0], StandardOpenOption.TRUNCATE_EXISTING); // 先清空文件内容
             // 计算LFC得分
             for (String ec : ecNumGeneHashMap.keySet()) {
                 double lfc = get_lfc(ec);
-                Files.write(path, (ec + "\t\t" + lfc + "\n").getBytes(),
+                Files.write(path, (ec + "\t" + lfc + "\n").getBytes(),
                         StandardOpenOption.APPEND);
             }
         }
 
         // 相关初始化
-        private static void init(String gene_type, ArrayList<String> filePaths, double alpha) throws Exception {
-            // 基因相似度结果 哈希表 初始化
-            similarityResult = Reader.getSimilarityResult(gene_type, alpha);
+        private static void init(String gene_type, double alpha) throws Exception {
             // 基因证据ec编号 哈希表 初始化
             switch (gene_type) {
                 case "Yeast":
-                    ecNumGeneHashMap = Reader.getYeastEcNumGeneHashMap(filePaths);
+                case "Arabidopsis_thaliana":
+                    // 基因相似度结果 哈希表 初始化
+                    similarityResult = Reader.getSimilarityResult(gene_type, alpha);
                     break;
                 case "Human":
-                    ecNumGeneHashMap = Reader.getHumanEcNumGeneHashMap(filePaths);
-                    break;
-                case "Arabidopsis_thaliana":
-                    ecNumGeneHashMap = Reader.getArabidopsisEcNumGeneHashMap(filePaths);
+                    // 基因相似度结果 哈希表 初始化
+                    similarityResult = Reader.getHumanSimilarityResult(gene_type, alpha);
                     break;
             }
         }
@@ -730,7 +738,10 @@ public class Calculator {
             if (similarityValue == null) {
                 similarityValue = similarityResult.get(otherGene + ":" + gene);
             }
-            return similarityValue != null ? Math.max(similarityValue, 0.0) : 0.0; // 默认返回0.0
+            if (similarityValue.isNaN()) {
+                return 0.0;
+            }
+            return Math.max(similarityValue, 0.0); // 默认返回0.0
         }
 
     }

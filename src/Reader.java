@@ -1,3 +1,6 @@
+import com.opencsv.CSVReader;
+import com.opencsv.exceptions.CsvException;
+
 import java.io.BufferedReader;
 import java.io.FileReader;
 import java.io.IOException;
@@ -6,6 +9,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -55,7 +59,7 @@ public class Reader {
     }
 
     // 读取注释信息文件，获得注释信息数据数组
-    public static ArrayList<Annotation> readGafFile(String gaf) throws IOException {
+    public static ArrayList<Annotation> readGafFile(String gaf, String gene_type) throws IOException {
         ArrayList<Annotation> annotationList = new ArrayList<>();
 
         try (BufferedReader br = new BufferedReader(new FileReader(gaf))) {
@@ -117,8 +121,27 @@ public class Reader {
         for (String line : Files.readAllLines(Paths.get("result/" + gene_type + "/similarityResult" + alpha + ".txt"))) {
             String gene1 = line.split("\t")[0];
             String gene2 = line.split("\t")[1];
-            Double value = Double.parseDouble(line.split("\t")[2]);
-            similarityResult.put(gene1 + ":" + gene2, value);
+            String value = line.split("\t")[2];
+            similarityResult.put(gene1 + ":" + gene2, Double.parseDouble(value));
+        }
+        return similarityResult;
+    }
+
+    // 读取基因相似度文件，获得基因相似度数据数组 列表
+    public static HashMap<String, Double> getHumanSimilarityResult(String gene_type, double alpha) throws IOException {
+        // 根据映射文件获取标识符与基因的映射表
+        HashMap<String, String> idGeneHashMap = new HashMap<>();
+        for (String line : Files.readAllLines(Paths.get("buf/Human/id_symbol.map"))) {
+            String[] values = line.split("\t");
+            idGeneHashMap.put(values[1], values[0]);
+        }
+        // 读取基因相似度文件
+        HashMap<String, Double> similarityResult = new HashMap<>();
+        for (String line : Files.readAllLines(Paths.get("result/" + gene_type + "/similarityResult" + alpha + ".txt"))) {
+            String gene1 = line.split("\t")[0];
+            String gene2 = line.split("\t")[1];
+            double value = Double.parseDouble(line.split("\t")[2]);
+            similarityResult.put(idGeneHashMap.get(gene1) + ":" + idGeneHashMap.get(gene2), value);
         }
         return similarityResult;
     }
@@ -158,8 +181,13 @@ public class Reader {
                 if (columns.length < 8) {
                     continue;
                 } // 确保行中有足够的列
-                String ecNumber = columns[3].replace("EC-", "").trim(); // EC编号
-                String geneName = columns[7].trim(); // 基因名字
+                String ecNumberRaw = columns[3].trim(); // 原始EC编号
+                String ecNumber = ecNumberRaw.replace("EC-", ""); // 去掉EC前缀
+                String geneName = columns[6].trim(); // 基因名字
+                // 过滤掉无效的基因名字
+                if (geneName.equals("unknown")) {
+                    continue;
+                }
                 // 检查EC编号和基因名字是否为空
                 if (!ecNumber.isEmpty() && !geneName.isEmpty()) {
                     ecNumGeneHashMap.putIfAbsent(ecNumber, new HashSet<>()); // 如果没有则创建新的集合
@@ -178,36 +206,86 @@ public class Reader {
 
     // 读取Human ec文件，获得ec数据
     public static HashMap<String, HashSet<String>> getHumanEcNumGeneHashMap(ArrayList<String> filePaths) throws IOException {
-        HashMap<String, HashSet<String>> ecNumGeneHashMap = new HashMap<>();
-        try (BufferedReader br = new BufferedReader(new FileReader(filePaths.get(3)))) {
-            String line;
-            // 跳过表头（如果有）
-            br.readLine();
-            while ((line = br.readLine()) != null) {
-                String[] columns = line.split(","); // 使用逗号作为分隔符
-                if (columns.length < 2) {
-                    continue; // 确保行中有足够的列
+        HashMap<String, HashSet<String>> ecGeneHashMap = new HashMap<>();
+
+        try (CSVReader csvReader = new CSVReader(new FileReader(filePaths.get(3)))) {
+            List<String[]> allRows = csvReader.readAll();  // 读取所有行
+            // 跳过表头
+            String[] headers = allRows.get(0);
+
+            // 找到 gene_ids 和 ecs 列的索引
+            int geneIdIndex = -1;
+            int ecIndex = -1;
+            for (int i = 0; i < headers.length; i++) {
+                if (headers[i].equalsIgnoreCase("geneids")) {
+                    geneIdIndex = i;
                 }
-                String ecStr = columns[0].trim(); // 获取ecs列（假设在第一列）
-                String geneIdStr = columns[1].trim(); // 获取gene_ids列（假设在第二列）
-                if (!ecStr.isEmpty() && !geneIdStr.isEmpty()) {
-                    String[] ecList = ecStr.split("\\|"); // 分割ecs
-                    String[] geneIdList = geneIdStr.split("\\|"); // 分割gene_ids
-                    // 创建对应关系
-                    for (int i = 0; i < Math.min(ecList.length, geneIdList.length); i++) {
-                        String geneId = geneIdList[i].trim();
-                        String ec = ecList[i].trim();
-                        ecNumGeneHashMap.computeIfAbsent(geneId, k -> new HashSet<>()).add(ec); // 添加基因ID到相应的EC编号下
+                if (headers[i].equalsIgnoreCase("ecs")) {
+                    ecIndex = i;
+                }
+            }
+
+            // 确保索引合法
+            if (geneIdIndex == -1 || ecIndex == -1) {
+                throw new IllegalArgumentException("未找到 geneids 或 ecs 列");
+            }
+
+            // 遍历余下的行
+            for (int i = 1; i < allRows.size(); i++) { // 从 1 开始以跳过表头
+                String[] columns = allRows.get(i);
+                if (columns.length > Math.max(geneIdIndex, ecIndex)) {
+                    String geneIdStr = columns[geneIdIndex].trim();
+                    String ecStr = columns[ecIndex].trim();
+
+                    if (!geneIdStr.isEmpty() && !ecStr.isEmpty()) {
+                        String[] geneIdList = geneIdStr.split("\\|"); // 分割 gene_ids
+                        String[] ecList = ecStr.split("\\|"); // 分割 ecs
+                        // 创建对应关系
+                        for (String s : ecList) {
+                            String ec = s.trim();
+                            // 如果EC编号为空，则跳过
+                            if (ec.isEmpty()) continue;
+
+                            // 确保基因ID能够添加到关联的EC中
+                            for (String geneId : geneIdList) {
+                                if (!geneId.isEmpty()) {
+                                    ecGeneHashMap.computeIfAbsent(ec, k -> new HashSet<>()).add(geneId.trim()); // 添加基因 ID 到相应的 EC 编号下
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (IOException | CsvException e) {
+            throw new IOException(e); // 处理 IO 异常
+        }
+
+        // 过滤掉只包含一个EC的基因组合
+        ecGeneHashMap.entrySet().removeIf(entry -> entry.getValue().size() <= 1);
+        // 移除空字符串的键（如果存在）
+        ecGeneHashMap.remove("");
+        return ecGeneHashMap;
+    }
+
+    public static List<String> getHumanGeneNameToIdentifierMap(List<String> uniqueGenesList) throws IOException {
+        List<String> geneNameToIdentifierMap = new ArrayList<>();
+        // 读取 Human 基因名到 ID 的.map映射文件
+        try (BufferedReader br = new BufferedReader(new FileReader("buf/Human/id_symbol.map"))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                String[] columns = line.split("\t");
+                if (columns.length > 1) {
+                    String geneName = columns[0].trim();
+                    String geneId = columns[1].trim();
+                    if (uniqueGenesList.contains(geneName)) {
+                        geneNameToIdentifierMap.add(geneId);
                     }
                 }
             }
         } catch (IOException e) {
-            throw new IOException(e); // 处理IO异常
+            throw new IOException(e);
         }
-        // 过滤掉只包含一个基因的EC编号
-        ecNumGeneHashMap.entrySet().removeIf(entry -> entry.getValue().size() <= 1);
-        // 移除空字符串的键（如果存在）
-        ecNumGeneHashMap.remove("");
-        return ecNumGeneHashMap;
+
+        return geneNameToIdentifierMap;
     }
 }
